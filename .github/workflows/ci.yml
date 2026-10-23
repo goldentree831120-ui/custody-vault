@@ -1,4 +1,4 @@
-# CI: contract tests, mutation checks, Slither and the Java orchestrator on every push and pull request.
+# CI: contract tests, mutation checks, Slither, the Java orchestrator and the Bitcoin regtest multisig on every push and pull request.
 name: CI
 
 on:
@@ -76,3 +76,14 @@ jobs:
         run: mvn -B -ntp test -DrequireAnvil=true
       - name: Mutation check (19 planted bugs must all be caught)
         run: ./scripts/mutation-check.sh | tee /tmp/mutation.txt && ! grep -qE "SURVIVED|\?\?" /tmp/mutation.txt
+
+  bitcoin:
+    name: Bitcoin regtest 2-of-3 P2WSH multisig with PSBTs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Bitcoin Core (checksum verified)
+        run: ./bitcoin/install-bitcoin-core.sh
+      - name: Regtest multisig scenario
+        run: BITCOIN_BIN="$HOME/.local/opt/bitcoin-31.1/bin" ./bitcoin/regtest-multisig.sh
