@@ -140,7 +140,7 @@ cancel a proposal that removes *them*; or let a pause expire unless re-confirmed
 ### 4.7 Reentrancy and external calls
 The vault calls out in two places: the ETH transfer to the destination, and the ERC-20 transfer.
 `execute` is `nonReentrant`, and it marks the proposal executed and updates the rate-limit
-bucket **before** the external call (checks-effects-interactions: line 252, and lines 433–435 before the transfer on line 439).
+bucket **before** the external call (checks-effects-interactions: line 253, and lines 438–440 before the transfer on line 444).
 A malicious contract destination that re-enters is blocked
 (`test_reentrancyThroughEthReceiver_isBlocked`). The vault holds no other balances that could
 fall out of sync (`invariant_conservation`).

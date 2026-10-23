@@ -1,0 +1,16 @@
+'forge clean' running
+'forge config --json' running
+'forge build --build-info --deny never --skip ./test/** ./script/** --force' running
+INFO:Detectors:
+Detector: costly-loop
+CustodyVault.removeOwner(address) (src/CustodyVault.sol#312-324) has costly operations inside a loop:
+	- _owners.pop() (src/CustodyVault.sol#318)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#costly-operations-inside-a-loop
+INFO:Detectors:
+Detector: low-level-calls
+Low level call in CustodyVault.execute(uint256) (src/CustodyVault.sol#242-262):
+	- (ok,ret) = address(this).call(p.data) (src/CustodyVault.sol#259)
+Low level call in CustodyVault._executeWithdrawal(uint256,CustodyVault.Proposal) (src/CustodyVault.sol#430-452):
+	- (ok,None) = p.to.call{value: p.amount}() (src/CustodyVault.sol#444)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#low-level-calls
+INFO:Slither:. analyzed (8 contracts with 102 detectors), 3 result(s) found

@@ -13,8 +13,11 @@ mutate() { # name, perl substitution
   if cmp -s "$SRC" /tmp/CustodyVault.sol.orig; then echo "?? $1: mutation did not apply"; return; fi
   forge test >/tmp/mut.log 2>&1
   local inv unit
-  # Failing invariants print "[FAIL: reason]" and the name on a later, indented line.
-  inv=$(grep -oE '^[[:space:]]+invariant_[A-Za-z]+' /tmp/mut.log | tr -d ' \t' | sort -u | tr '\n' ' ')
+  # Failing invariants = every invariant named in the log minus those marked [PASS].
+  # Works for both forge output formats (older: name on its own line after "[FAIL: ...]";
+  # newer: invariants grouped under one test as "[PASS] invariant_x" / "[FAIL: ...] invariant_x").
+  inv=$(comm -23 <(grep -oE 'invariant_[A-Za-z]+' /tmp/mut.log | sort -u) \
+                 <(grep -E '\[PASS\]' /tmp/mut.log | grep -oE 'invariant_[A-Za-z]+' | sort -u) | tr '\n' ' ')
   unit=$(grep -E '^\[FAIL' /tmp/mut.log | grep -oE '\] test[A-Za-z_]+' | sort -u | wc -l | tr -d ' ')
   if [ -z "$inv" ] && [ "$unit" = 0 ]; then
     echo "SURVIVED  $1"

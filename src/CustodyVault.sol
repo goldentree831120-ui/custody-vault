@@ -246,6 +246,7 @@ contract CustodyVault is ReentrancyGuard {
         if (n < threshold) revert NotEnoughApprovals(id, n, threshold);
 
         uint256 readyAt = executableAt(id);
+        // slither-disable-next-line timestamp -- the timelock is time-based by design; seconds of drift vs a >=1h delay
         if (block.timestamp < readyAt) revert TimelockActive(id, readyAt);
 
         // Effects before interactions: a re-entrant call sees the proposal as executed.
@@ -292,6 +293,7 @@ contract CustodyVault is ReentrancyGuard {
         Bucket storage b = _buckets[asset];
         uint128 current = _refilled(asset);
         assetPolicy[asset] = AssetPolicy({dailyLimit: dailyLimit, largeThreshold: largeThreshold});
+        // slither-disable-next-line timestamp -- clamps the bucket when the limit is lowered; `current` depends on time
         b.available = current < dailyLimit ? current : dailyLimit;
         b.lastUpdate = uint64(block.timestamp);
         emit AssetPolicySet(asset, dailyLimit, largeThreshold);
@@ -347,7 +349,8 @@ contract CustodyVault is ReentrancyGuard {
 
     /// @notice Approvals from *current* owners only: a removed owner's past approval no longer counts.
     function approvalCount(uint256 id) public view returns (uint256 n) {
-        for (uint256 i = 0; i < _owners.length; i++) {
+        uint256 len = _owners.length;
+        for (uint256 i = 0; i < len; i++) {
             if (hasApproved[id][_owners[i]]) n++;
         }
     }
@@ -406,6 +409,7 @@ contract CustodyVault is ReentrancyGuard {
         if (p.ownerSetVersion != ownerSetVersion) revert ProposalStale(id);
         uint256 deadline =
             p.thresholdReachedAt == 0 ? uint256(p.createdAt) + APPROVAL_WINDOW : executableAt(id) + EXECUTION_WINDOW;
+        // slither-disable-next-line timestamp -- 14-day / 7-day windows; seconds of drift are irrelevant
         if (block.timestamp > deadline) revert ProposalExpired(id);
     }
 
@@ -429,6 +433,7 @@ contract CustodyVault is ReentrancyGuard {
         if (!isAllowedDestination[p.to]) revert DestinationNotAllowed(p.to);
 
         uint128 available = _refilled(p.asset);
+        // slither-disable-next-line timestamp -- the rate limit refills over time by design; drift moves it by a negligible amount
         if (p.amount > available) revert RateLimited(p.amount, available);
         Bucket storage b = _buckets[p.asset];
         b.available = available - uint128(p.amount);
@@ -454,6 +459,7 @@ contract CustodyVault is ReentrancyGuard {
         if (limit == 0) return 0;
         uint256 refill = (limit * (block.timestamp - b.lastUpdate)) / 1 days;
         uint256 total = uint256(b.available) + refill;
+        // slither-disable-next-line timestamp -- capping the bucket at the daily limit; flagged only because refill uses time
         return uint128(total < limit ? total : limit);
     }
 

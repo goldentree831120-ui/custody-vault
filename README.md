@@ -1,19 +1,22 @@
 # Custody Vault
 
+[![CI](https://github.com/goldentree831120-ui/custody-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/goldentree831120-ui/custody-vault/actions/workflows/ci.yml)
+
 A multisig custody vault with a policy engine: M-of-N approvals, a timelock on large
 withdrawals and on every configuration change, per-asset rate limits, a destination
 allowlist and an emergency pause. Solidity + Foundry.
 
-Status: **M1** threat model outline (`docs/THREAT_MODEL.md`, for me to write) and
-**M2** vault + tests are done. M3 Slither, M4 Java signing orchestrator, M5 hash-chained
-audit log, M6 Bitcoin regtest PSBT and M7 README are next.
+Status: **M1** threat model ([`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)), **M2** vault + tests and
+**M3** Slither ([`docs/SLITHER_TRIAGE.md`](docs/SLITHER_TRIAGE.md)) are done. M4 Java signing orchestrator,
+M5 hash-chained audit log, M6 Bitcoin regtest PSBT and M7 README are next.
 
 ```bash
-# once, after cloning: install the pinned dependencies into lib/ (git submodules)
-forge install foundry-rs/forge-std@v1.17.0 OpenZeppelin/openzeppelin-contracts@v5.1.0
+# after cloning: fetch the pinned dependencies (forge-std v1.17.0, OpenZeppelin v5.1.0, git submodules)
+git submodule update --init --recursive
 forge test               # 35 unit/fuzz tests + 7 invariants, ~10 s
 FOUNDRY_PROFILE=deep forge test --match-path 'test/invariant/*'   # 2,000 runs x 200 calls, ~2-3 min
 ./script/mutation-check.sh   # plants 6 bugs one at a time; the suite must catch each
+pip install slither-analyzer==0.11.6 && slither . --exclude-dependencies --filter-paths "lib/|test/|script/" --fail-low
 ```
 
 On Windows, run these in WSL or Git Bash (Foundry: https://getfoundry.sh).

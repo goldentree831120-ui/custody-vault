@@ -1,0 +1,51 @@
+# CI: tests, mutation check and Slither on every push and pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (unit, fuzz, invariants) + mutation check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - run: forge --version
+      - run: forge build --sizes
+      - name: forge test (35 unit/fuzz tests + 7 invariants)
+        run: forge test
+      - name: Mutation check (6 planted bugs must all be caught)
+        run: ./script/mutation-check.sh | tee /tmp/mutation.txt && ! grep -qE "SURVIVED|did not apply" /tmp/mutation.txt
+
+  slither:
+    name: Slither (fails on any new Low+ finding)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: pip install slither-analyzer==0.11.6
+      - run: slither . --exclude-dependencies --filter-paths "lib/|test/|script/" --fail-low
