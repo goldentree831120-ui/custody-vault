@@ -1,4 +1,4 @@
-# CI: tests, mutation check and Slither on every push and pull request.
+# CI: contract tests, mutation checks, Slither and the Java orchestrator on every push and pull request.
 name: CI
 
 on:
@@ -49,3 +49,30 @@ jobs:
           python-version: "3.13"
       - run: pip install slither-analyzer==0.11.6
       - run: slither . --exclude-dependencies --filter-paths "lib/|test/|script/" --fail-low
+
+  orchestrator:
+    name: Orchestrator (Java) unit + end-to-end on Anvil + mutation check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: orchestrator
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Build the vault (the end-to-end test deploys it)
+        run: forge build
+        working-directory: .
+      - name: Unit tests + end-to-end on Anvil (must not be skipped)
+        run: mvn -B -ntp test -DrequireAnvil=true
+      - name: Mutation check (13 planted bugs must all be caught)
+        run: ./scripts/mutation-check.sh | tee /tmp/mutation.txt && ! grep -qE "SURVIVED|\?\?" /tmp/mutation.txt

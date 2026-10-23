@@ -4,11 +4,12 @@
 
 A multisig custody vault with a policy engine: M-of-N approvals, a timelock on large
 withdrawals and on every configuration change, per-asset rate limits, a destination
-allowlist and an emergency pause. Solidity + Foundry.
+allowlist and an emergency pause. Solidity + Foundry, with a Java signing orchestrator in front.
 
-Status: **M1** threat model ([`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)), **M2** vault + tests and
-**M3** Slither ([`docs/SLITHER_TRIAGE.md`](docs/SLITHER_TRIAGE.md)) are done. M4 Java signing orchestrator,
-M5 hash-chained audit log, M6 Bitcoin regtest PSBT and M7 README are next.
+Status: **M1** threat model ([`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)), **M2** vault + tests,
+**M3** Slither ([`docs/SLITHER_TRIAGE.md`](docs/SLITHER_TRIAGE.md)) and **M4** signing orchestrator
+([`orchestrator/`](orchestrator/README.md); mock HSM, test keys only) are done. M5 hash-chained
+audit log, M6 Bitcoin regtest PSBT and M7 README are next.
 
 ```bash
 # after cloning: fetch the pinned dependencies (forge-std v1.17.0, OpenZeppelin v5.1.0, git submodules)
@@ -17,6 +18,7 @@ forge test               # 35 unit/fuzz tests + 7 invariants, ~10 s
 FOUNDRY_PROFILE=deep forge test --match-path 'test/invariant/*'   # 2,000 runs x 200 calls, ~2-3 min
 ./script/mutation-check.sh   # plants 6 bugs one at a time; the suite must catch each
 pip install slither-analyzer==0.11.6 && slither . --exclude-dependencies --filter-paths "lib/|test/|script/" --fail-low
+cd orchestrator && ./demo.sh  # Java 21 + Maven: approvers sign EIP-712 intents, the mock HSM signs, Anvil runs the vault
 ```
 
 On Windows, run these in WSL or Git Bash (Foundry: https://getfoundry.sh).
@@ -41,7 +43,7 @@ target the six `onlySelf` functions. There is no admin key.
 
 | Decision | Why | Trade-off |
 |---|---|---|
-| Approvals are on-chain transactions, not off-chain signatures | No signature replay surface; every approval is logged with its sender | Each approval costs gas. M4 can add EIP-712 signatures with a nonce + chain id + vault address in the domain |
+| Approvals are on-chain transactions, not off-chain signatures | No signature replay surface in the contract; every approval is logged with its sender | Each approval costs gas. The M4 orchestrator puts EIP-712 intents (nonce, deadline, chain id and vault in the domain) in front, off-chain, and still approves on-chain |
 | **Token bucket** rate limit, not a fixed daily window | A fixed window lets 2x the limit out across midnight. A bucket never holds more than one day's limit | Slightly more state. Rounding is floor, so it always errs toward the vault |
 | New assets start with an **empty** bucket | Total outflow since configuration is provably `<= limit * days` | First withdrawal of a new asset waits for refill |
 | Lowering a limit clamps immediately; raising it refills gradually | Tightening should be instant, loosening should not create a burst | |
