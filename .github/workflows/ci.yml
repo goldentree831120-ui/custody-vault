@@ -51,7 +51,7 @@ jobs:
       - run: slither . --exclude-dependencies --filter-paths "lib/|test/|script/" --fail-low
 
   orchestrator:
-    name: Orchestrator (Java) unit + end-to-end on Anvil + mutation check
+    name: Orchestrator + audit log (Java) unit + end-to-end on Anvil + mutation check
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     defaults:
@@ -74,5 +74,5 @@ jobs:
         working-directory: .
       - name: Unit tests + end-to-end on Anvil (must not be skipped)
         run: mvn -B -ntp test -DrequireAnvil=true
-      - name: Mutation check (13 planted bugs must all be caught)
+      - name: Mutation check (19 planted bugs must all be caught)
         run: ./scripts/mutation-check.sh | tee /tmp/mutation.txt && ! grep -qE "SURVIVED|\?\?" /tmp/mutation.txt

@@ -7,9 +7,10 @@ withdrawals and on every configuration change, per-asset rate limits, a destinat
 allowlist and an emergency pause. Solidity + Foundry, with a Java signing orchestrator in front.
 
 Status: **M1** threat model ([`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)), **M2** vault + tests,
-**M3** Slither ([`docs/SLITHER_TRIAGE.md`](docs/SLITHER_TRIAGE.md)) and **M4** signing orchestrator
-([`orchestrator/`](orchestrator/README.md); mock HSM, test keys only) are done. M5 hash-chained
-audit log, M6 Bitcoin regtest PSBT and M7 README are next.
+**M3** Slither ([`docs/SLITHER_TRIAGE.md`](docs/SLITHER_TRIAGE.md)), **M4** signing orchestrator
+([`orchestrator/`](orchestrator/README.md); mock HSM, test keys only) and **M5** hash-chained audit
+log ([`orchestrator/README.md#audit-log-m5`](orchestrator/README.md#audit-log-m5)) are done. M6 Bitcoin
+regtest PSBT and M7 README are next.
 
 ```bash
 # after cloning: fetch the pinned dependencies (forge-std v1.17.0, OpenZeppelin v5.1.0, git submodules)
@@ -18,7 +19,7 @@ forge test               # 35 unit/fuzz tests + 7 invariants, ~10 s
 FOUNDRY_PROFILE=deep forge test --match-path 'test/invariant/*'   # 2,000 runs x 200 calls, ~2-3 min
 ./script/mutation-check.sh   # plants 6 bugs one at a time; the suite must catch each
 pip install slither-analyzer==0.11.6 && slither . --exclude-dependencies --filter-paths "lib/|test/|script/" --fail-low
-cd orchestrator && ./demo.sh  # Java 21 + Maven: approvers sign EIP-712 intents, the mock HSM signs, Anvil runs the vault
+cd orchestrator && ./demo.sh  # Java 21 + Maven: EIP-712 intents, mock HSM, Anvil, and a verified audit log
 ```
 
 On Windows, run these in WSL or Git Bash (Foundry: https://getfoundry.sh).

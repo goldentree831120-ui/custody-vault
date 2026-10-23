@@ -4,3 +4,5 @@ broadcast/
 .env
 orchestrator/target/
 orchestrator/used-nonces*.txt
+orchestrator/audit-*.log
+orchestrator/audit-*.anchors

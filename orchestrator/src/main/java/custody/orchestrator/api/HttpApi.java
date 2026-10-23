@@ -31,6 +31,7 @@ import java.util.regex.Pattern;
  * POST /v1/intents                     {"type", "message", "signature"}
  * GET  /v1/proposals/{id}
  * POST /v1/proposals/{id}/execute
+ * GET  /v1/audit/head                  newest audit entry's seq and hash, for external anchoring
  * </pre>
  */
 public final class HttpApi {
@@ -71,6 +72,16 @@ public final class HttpApi {
                             "vault", orchestrator.domain().vault(), "signer", "MOCK HSM (test keys only)"));
                 } else if (path.equals("/v1/domain") && method.equals("GET")) {
                     reply(ex, 200, domainJson());
+                } else if (path.equals("/v1/audit/head") && method.equals("GET")) {
+                    Map<String, Object> h = new LinkedHashMap<>();
+                    orchestrator.audit().head().ifPresentOrElse(x -> {
+                        h.put("seq", x.seq());
+                        h.put("hash", x.hash());
+                    }, () -> {
+                        h.put("seq", 0);
+                        h.put("hash", null);
+                    });
+                    reply(ex, 200, h);
                 } else if (path.equals("/v1/intents") && method.equals("POST")) {
                     Map<String, Object> body = readJson(ex);
                     Intents.SignedIntent s;

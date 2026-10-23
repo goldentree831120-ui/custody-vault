@@ -9,6 +9,7 @@ import custody.orchestrator.Intents.Domain;
 import custody.orchestrator.Intents.SignedIntent;
 import custody.orchestrator.Intents.WithdrawalApproval;
 import custody.orchestrator.Intents.WithdrawalRequest;
+import custody.orchestrator.audit.Audit;
 import custody.orchestrator.crypto.Address;
 import custody.orchestrator.crypto.Hex;
 import custody.orchestrator.hsm.HsmSigner;
@@ -73,8 +74,19 @@ public final class Orchestrator {
     private final NonceStore nonces;
     private final Clock clock;
     private final Policy policy;
+    private final Audit audit;
 
     public Orchestrator(Domain domain, HsmSigner signer, Chain chain, NonceStore nonces, Clock clock, Policy policy) {
+        this(domain, signer, chain, nonces, clock, policy, Audit.NONE);
+    }
+
+    /**
+     * @param audit every request, rejection, signing request and result is recorded here. The
+     *     signing request is recorded <b>before</b> the signer is called, and if it can't be
+     *     recorded nothing is signed: every signature has an audit entry.
+     */
+    public Orchestrator(Domain domain, HsmSigner signer, Chain chain, NonceStore nonces, Clock clock, Policy policy,
+            Audit audit) {
         if (chain.chainId() != domain.chainId()) {
             throw new IllegalStateException("RPC is on chain " + chain.chainId() + " but the domain says " + domain.chainId());
         }
@@ -84,6 +96,7 @@ public final class Orchestrator {
         this.nonces = nonces;
         this.clock = clock;
         this.policy = policy;
+        this.audit = audit;
     }
 
     public Domain domain() {
@@ -92,6 +105,29 @@ public final class Orchestrator {
 
     /** One request at a time: owner-account transaction nonces stay in order and checks can't interleave. */
     public synchronized Outcome submit(SignedIntent s) {
+        Map<String, Object> received = new LinkedHashMap<>();
+        received.put("intent", Intents.toJson(s)); // includes the approver's signature: re-verifiable later
+        received.put("signer", s.signer(domain).orElse(null));
+        audit.record("intent.received", received);
+        String ref = ref();
+        try {
+            Outcome o = doSubmit(s, ref);
+            Map<String, Object> done = new LinkedHashMap<>();
+            done.put("ref", ref);
+            done.putAll(o.toJson());
+            audit.record("request.completed", done);
+            return o;
+        } catch (Rejection r) {
+            recordRejection(ref, r);
+            throw r;
+        } catch (RuntimeException e) {
+            // Only the exception type: messages can contain infrastructure details (e.g. RPC URLs).
+            audit.record("request.failed", Map.of("ref", ref, "error", e.getClass().getName()));
+            throw e;
+        }
+    }
+
+    private Outcome doSubmit(SignedIntent s, String ref) {
         // 1. Who signed it, and which owner key that approver controls.
         String approver = s.signer(domain).orElseThrow(() -> reject(BAD_SIGNATURE, "signature is malformed"));
         String slot = signer.keySlots().stream()
@@ -148,7 +184,7 @@ public final class Orchestrator {
         //    approver signs a fresh intent. Failing closed beats any chance of a double use.
         if (!nonces.markUsed(approver, s.intent().nonce())) throw reject(NONCE_REUSED, "nonce already used");
 
-        Receipt receipt = sendSigned(slot, calldata, Optional.of(s));
+        Receipt receipt = sendSigned(ref, action, slot, owner, calldata, Optional.of(s));
         BigInteger id = switch (s.intent()) {
             case WithdrawalRequest r -> proposedId(receipt);
             case WithdrawalApproval a -> a.proposalId();
@@ -159,11 +195,35 @@ public final class Orchestrator {
         return outcome(action, id, slot, owner, receipt.txHash());
     }
 
+    public Audit audit() {
+        return audit;
+    }
+
     /**
      * Executes a proposal once the vault says it's ready. Needs no intent: execution only carries
      * out what M owners approved, and the contract re-checks everything.
      */
     public synchronized Outcome execute(BigInteger id) {
+        audit.record("execute.requested", Map.of("proposalId", id.toString()));
+        String ref = ref();
+        try {
+            Outcome o = doExecute(id, ref);
+            Map<String, Object> done = new LinkedHashMap<>();
+            done.put("ref", ref);
+            done.putAll(o.toJson());
+            audit.record("request.completed", done);
+            return o;
+        } catch (Rejection r) {
+            recordRejection(ref, r);
+            throw r;
+        } catch (RuntimeException e) {
+            // Only the exception type: messages can contain infrastructure details (e.g. RPC URLs).
+            audit.record("request.failed", Map.of("ref", ref, "error", e.getClass().getName()));
+            throw e;
+        }
+    }
+
+    private Outcome doExecute(BigInteger id, String ref) {
         openProposal(id);
         BigInteger readyAt = chain.executableAt(id);
         if (readyAt.equals(NOT_READY_SENTINEL)) {
@@ -179,7 +239,7 @@ public final class Orchestrator {
         String owner = signer.ownerAddress(slot);
         byte[] calldata = VaultCalls.execute(id);
         simulate(owner, calldata);
-        Receipt receipt = sendSigned(slot, calldata, Optional.empty());
+        Receipt receipt = sendSigned(ref, "executed", slot, owner, calldata, Optional.empty());
         LOG.log(System.Logger.Level.INFO, "executed proposal {0} via {1}: {2}", id, slot, receipt.txHash());
         return outcome("executed", id, slot, owner, receipt.txHash());
     }
@@ -233,15 +293,46 @@ public final class Orchestrator {
         }
     }
 
-    private Receipt sendSigned(String slot, byte[] calldata, Optional<SignedIntent> auth) {
+    private Receipt sendSigned(String ref, String action, String slot, String owner, byte[] calldata,
+            Optional<SignedIntent> auth) {
+        Map<String, Object> req = new LinkedHashMap<>();
+        req.put("ref", ref);
+        req.put("call", switch (action) {
+            case "proposed" -> "proposeWithdrawal";
+            case "approved" -> "approve";
+            case "cancelled" -> "cancel";
+            default -> "execute";
+        });
+        req.put("keySlot", slot);
+        req.put("owner", owner);
+        req.put("to", domain.vault());
+        req.put("calldata", Hex.encode(calldata));
+        audit.record("sign.requested", req); // write-ahead: throws (and nothing is signed) if it can't be recorded
         Receipt r;
         try {
             r = chain.send(slot, calldata, auth);
         } catch (HsmSigner.HsmRefusal e) {
             throw reject(SIGNER_REFUSED, "signer refused: " + e.getMessage());
         }
+        Map<String, Object> res = new LinkedHashMap<>();
+        res.put("ref", ref);
+        res.put("txHash", r.txHash());
+        res.put("success", r.success());
+        audit.record("tx.mined", res);
         if (!r.success()) throw reject(TX_FAILED, "transaction " + r.txHash() + " reverted");
         return r;
+    }
+
+    private String ref() {
+        return audit.head().map(h -> Long.toString(h.seq())).orElse("-");
+    }
+
+    private void recordRejection(String ref, Rejection r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ref", ref);
+        m.put("code", r.code.name());
+        m.put("message", r.getMessage());
+        audit.record("request.rejected", m);
     }
 
     private BigInteger proposedId(Receipt r) {

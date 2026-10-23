@@ -1,9 +1,10 @@
-# Signing orchestrator (M4)
+# Signing orchestrator (M4) and audit log (M5)
 
 A Java 21 service between the people who approve withdrawals and the CustodyVault contract.
 Approvers sign **intents** (EIP-712 typed data) on their own devices. The orchestrator checks
 each intent against the vault's on-chain state and policy, then asks the **signer** to sign the
-matching vault transaction with that approver's owner key.
+matching vault transaction with that approver's owner key. Every decision is written to a
+**hash-chained audit log** before it takes effect ([below](#audit-log-m5)).
 
 > **Test keys only.** The signer here is `MockHsmSigner`, a stand-in for an HSM or MPC signing
 > service. It holds Anvil's public development keys in memory and refuses to run on any chain
@@ -38,9 +39,9 @@ Needs Java 21, Maven and Foundry (Anvil). In WSL: `sudo apt install -y openjdk-2
 
 ```bash
 cd orchestrator
-./demo.sh                          # fresh Anvil + the real vault + the HTTP API: 20 checks
-mvn test                           # 52 unit tests + the end-to-end test on Anvil (needs `forge build` in the repo root)
-./scripts/mutation-check.sh        # plants 13 bugs in the security checks; every one must make a test fail
+./demo.sh                          # fresh Anvil + the real vault + the HTTP API + the audit log: 29 checks
+mvn test                           # 69 unit tests + the end-to-end test on Anvil (needs `forge build` in the repo root)
+./scripts/mutation-check.sh        # plants 19 bugs in the security checks; every one must make a test fail
 ```
 
 `./demo.sh` deploys a 2-of-3 vault (timelock 1 h for withdrawals from 5 ETH, 10 ETH/day) and runs:
@@ -48,7 +49,13 @@ a small withdrawal (request, approve, execute at once); a large one (refused bef
 executed after); eight requests the orchestrator refuses (mismatched approval, replay, destination
 not allowlisted, over the daily limit, unknown approver, a signature for another vault, expired, a
 deadline a week away); three the signer refuses even when called directly, bypassing the
-orchestrator; and a one-owner veto.
+orchestrator; and a one-owner veto. Then it verifies the audit log of all of that and tampers with
+copies of it five ways (see below). The log stays in `target/demo-audit/` for you to inspect:
+
+```bash
+mvn -q exec:java -Dexec.args="verify target/demo-audit/audit.log"      # exit 0: intact
+mvn -q exec:java -Dexec.args="verify target/demo-audit/tampered.log target/demo-audit/audit.anchors"  # exit 1
+```
 
 ## Trust model
 
@@ -94,6 +101,7 @@ Bound to 127.0.0.1. Errors are `{"error": {"code", "message"}}`; 500s never incl
 | `POST /v1/intents` | `{"type", "message", "signature"}` → the transaction hash, approvals, executable time |
 | `GET /v1/proposals/{id}` | state, approvals, threshold, executable time |
 | `POST /v1/proposals/{id}/execute` | executes when ready, otherwise `NOT_READY` |
+| `GET /v1/audit/head` | the newest audit entry's seq and hash, so outsiders can record it |
 
 Rejection codes: `BAD_SIGNATURE`, `UNKNOWN_APPROVER`, `EXPIRED`, `DEADLINE_TOO_FAR`, `NONCE_REUSED`,
 `NOT_AN_OWNER`, `UNKNOWN_PROPOSAL`, `PROPOSAL_MISMATCH`, `PROPOSAL_CLOSED`, `ALREADY_APPROVED`,
@@ -108,12 +116,14 @@ Rejection codes: `BAD_SIGNATURE`, `UNKNOWN_APPROVER`, `EXPIRED`, `DEADLINE_TOO_F
 | `EncodingTest` | RLP vectors, ABI encoding (checked against `cast abi-encode`), strict JSON | 5 |
 | `IntentsAndNoncesTest` | intent JSON strictness; the nonce file survives a restart | 3 |
 | `MockHsmSignerTest` | every signer refusal: other chains, other contracts, ETH value, calldata ≠ intent, wrong approver, expired, replay, no-intent calls other than execute; key material never printed | 10 |
-| `OrchestratorTest` | every rejection code, and that **nothing is sent** when a request is rejected; rejected intents keep their nonce, failed transactions use it up | 21 |
+| `OrchestratorTest` (checks) | every rejection code, and that **nothing is sent** when a request is rejected; rejected intents keep their nonce, failed transactions use it up | 21 |
 | `HttpApiTest` | routing, content type, body size limit, error shape, no internal details in 500s | 4 |
+| `AuditLogTest` | chaining and restart; every kind of tampering below; refusing to start on a tampered log | 12 |
+| `OrchestratorTest` (audit) | entries in order for requests, rejections and executions; **nothing is signed if the signing request can't be logged** | 5 |
 | `AnvilEndToEndTest` | the demo above on a real Anvil chain with the real vault | 1 |
 
-`scripts/mutation-check.sh` removes 13 security checks one at a time (in the orchestrator, the
-signer and signature parsing) and requires a failing test for each. CI runs all of it, and the
+`scripts/mutation-check.sh` removes 19 security checks one at a time (in the orchestrator, the
+signer, signature parsing and the audit log) and requires a failing test for each. CI runs all of it, and the
 end-to-end test can't be skipped there (`-DrequireAnvil=true`).
 
 ## Design notes
@@ -138,4 +148,54 @@ end-to-end test can't be skipped there (`-DrequireAnvil=true`).
 - Stuck or replaced transactions (fee bumping), reorgs, and more than one orchestrator instance.
 - State can change between the simulation and the transaction being mined. The vault re-checks
   everything, so the cost is a failed transaction, not a bypass.
-- A tamper-evident record of every decision: that is M5 (hash-chained audit log).
+- For the audit log: anchors on storage the orchestrator's host can't rewrite (see below), log
+  rotation, and recovery from a crash in the middle of writing a line (today the service refuses
+  to start and a person has to look).
+
+## Audit log (M5)
+
+`audit/AuditLog.java`: one JSON object per line, appended and flushed to disk (`fsync`) before the
+orchestrator goes on.
+
+```json
+{"seq":3,"time":"2026-10-23T06:49:41.39Z","event":"sign.requested","data":{"ref":"2","call":"proposeWithdrawal","keySlot":"owner-1",...},"prev":"0x1277…","hash":"0xfdf5…"}
+```
+
+`hash = SHA-256("custody-audit-v1\n" + the line without its hash field)`, and that line includes
+`prev`, the hash of the line before. The first line's `prev` is 64 zeros.
+
+**What's recorded.** `intent.received` (the whole signed intent, including the approver's
+signature, so anyone can re-check later who authorised what), `request.rejected` (with the code),
+`execute.requested`, `sign.requested` (key slot, owner, the exact calldata), `tx.mined`,
+`request.completed`, `request.failed`. Later entries carry `ref`, the seq of the request they
+belong to. Never recorded: keys, RPC URLs, exception messages (they can contain infrastructure
+details; only the exception type is logged).
+
+**Write-ahead.** `sign.requested` is written before the signer is called. If it can't be written
+(disk full, permissions), nothing is signed. So every signature the service ever asks for has
+an entry before it.
+
+**What verification catches, and what it needs to catch it:**
+
+| Tampering | Caught by | How it shows up |
+|---|---|---|
+| A field changed in an entry | the chain | `line N: hash does not match the entry's contents` |
+| An entry deleted, inserted, duplicated or moved | the chain | `line N: seq is X, expected N` |
+| An entry deleted and the next one renumbered | the chain | `line N: prev does not match the hash of line N-1` |
+| Whitespace or field order changed, extra fields | the chain | `not in canonical form` / `unexpected fields` |
+| A half-written last line (crash) | the chain | `not valid JSON (incomplete last line?)` |
+| **The last entries cut off** | anchors only | `anchor … records entry 60, but the log has only 58` |
+| **The whole chain recomputed after an edit** | anchors only | `entry 5 has a different hash than when it was anchored` |
+
+The last two rows are the honest limit of a hash chain: someone who can rewrite the whole file can
+also recompute every hash, or simply drop the newest lines, and the chain still looks perfect. The
+demo shows this (a truncated log verifies fine without anchors). So every N entries (5 in the demo,
+10 in `serve`) the current head (`seq`, `hash`) is also appended to a separate **anchor file**, and
+verification checks that every anchored head is still in the log. That only helps if the anchors
+are somewhere the log's host can't rewrite: in production, WORM / object-lock storage, a
+different team's system, or a public chain (a transaction containing the head hash); and
+`GET /v1/audit/head` lets any outside party record heads too. Entries written after the last
+anchor can still be cut off undetected, so the anchor interval is the window of exposure.
+
+The service checks the whole log, with anchors, every time it starts, and **refuses to start** if
+verification fails.

@@ -9,6 +9,7 @@ import custody.orchestrator.Intents.Intent;
 import custody.orchestrator.Intents.SignedIntent;
 import custody.orchestrator.Intents.WithdrawalApproval;
 import custody.orchestrator.Intents.WithdrawalRequest;
+import custody.orchestrator.audit.Audit;
 import custody.orchestrator.crypto.Secp256k1;
 import custody.orchestrator.hsm.AnvilTestKeys;
 import custody.orchestrator.hsm.MockHsmSigner;
@@ -17,7 +18,10 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -42,6 +46,26 @@ class OrchestratorTest {
     NonceStore nonces;
     Orchestrator orch;
     long nextNonce = 1;
+    RecordingAudit audit = new RecordingAudit();
+
+    /** Keeps entries in memory; can be told to fail on one event type, as a full disk would. */
+    static final class RecordingAudit implements Audit {
+        final List<String> events = new ArrayList<>();
+        final List<Map<String, Object>> data = new ArrayList<>();
+        String failOn;
+
+        @Override
+        public void record(String event, Map<String, Object> d) {
+            if (event.equals(failOn)) throw new java.io.UncheckedIOException(new java.io.IOException("disk full"));
+            events.add(event);
+            data.add(d);
+        }
+
+        @Override
+        public Optional<Head> head() {
+            return events.isEmpty() ? Optional.empty() : Optional.of(new Head(events.size(), "0x"));
+        }
+    }
 
     static String addr(int i) {
         return Secp256k1.address(AnvilTestKeys.key(i));
@@ -64,7 +88,7 @@ class OrchestratorTest {
         chain.dailyLimits.put(TOKEN, BigInteger.valueOf(10_000));
         nonces = new NonceStore.InMemory();
         orch = new Orchestrator(domain, hsm, chain, nonces, clock,
-                new Orchestrator.Policy(Duration.ofHours(1), Map.of(TOKEN, BigInteger.valueOf(500))));
+                new Orchestrator.Policy(Duration.ofHours(1), Map.of(TOKEN, BigInteger.valueOf(500))), audit);
     }
 
     // ---- helpers ---------------------------------------------------------------------------
@@ -280,5 +304,47 @@ class OrchestratorTest {
         FakeChain mainnet = new FakeChain(1, VAULT);
         assertThrows(IllegalStateException.class, () -> new Orchestrator(domain, hsm, mainnet, nonces,
                 Clock.systemUTC(), Orchestrator.Policy.defaults()));
+    }
+
+    // ---- audit -----------------------------------------------------------------------------
+
+    @Test
+    void auditRecordsEachStepInOrder() {
+        orch.submit(sign(request(DEST, AMOUNT), APPROVER_A));
+        assertEquals(List.of("intent.received", "sign.requested", "tx.mined", "request.completed"), audit.events);
+        assertEquals(Secp256k1.address(APPROVER_A), audit.data.get(0).get("signer"));
+        assertEquals("1", audit.data.get(1).get("ref")); // later entries point back to the request's entry
+        assertEquals("owner-1", audit.data.get(1).get("keySlot"));
+        assertEquals("proposed", audit.data.get(3).get("action"));
+    }
+
+    @Test
+    void rejectionsAreRecordedWithTheirCode() {
+        assertRejected(DESTINATION_NOT_ALLOWED, sign(request(OTHER, AMOUNT), APPROVER_A));
+        assertEquals(List.of("intent.received", "request.rejected"), audit.events);
+        assertEquals("DESTINATION_NOT_ALLOWED", audit.data.get(1).get("code"));
+    }
+
+    @Test
+    void nothingIsSignedIfTheSigningRequestCantBeRecorded() {
+        audit.failOn = "sign.requested";
+        SignedIntent s = sign(request(DEST, AMOUNT), APPROVER_A);
+        assertThrows(java.io.UncheckedIOException.class, () -> orch.submit(s));
+        assertTrue(chain.sent.isEmpty(), "a transaction was signed without an audit entry");
+    }
+
+    @Test
+    void nothingHappensIfTheRequestCantBeRecorded() {
+        audit.failOn = "intent.received";
+        assertThrows(java.io.UncheckedIOException.class, () -> orch.submit(sign(request(DEST, AMOUNT), APPROVER_A)));
+        assertTrue(chain.sent.isEmpty());
+    }
+
+    @Test
+    void executionIsAuditedToo() {
+        BigInteger id = chain.addProposal(true, ETH, DEST, AMOUNT);
+        chain.executableAt.put(id, BigInteger.valueOf(chain.time));
+        orch.execute(id);
+        assertEquals(List.of("execute.requested", "sign.requested", "tx.mined", "request.completed"), audit.events);
     }
 }

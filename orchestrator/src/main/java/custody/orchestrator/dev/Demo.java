@@ -13,6 +13,7 @@ import custody.orchestrator.Orchestrator;
 import custody.orchestrator.VaultCalls;
 import custody.orchestrator.VaultClient;
 import custody.orchestrator.api.HttpApi;
+import custody.orchestrator.audit.AuditLog;
 import custody.orchestrator.eth.Eip1559Tx;
 import custody.orchestrator.eth.Json;
 import custody.orchestrator.eth.JsonRpc;
@@ -25,9 +26,15 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.TreeMap;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -57,8 +64,17 @@ public final class Demo {
         String vault = deployAndConfigure(rpc, artifact);
         domain = new Domain(rpc.chainId(), vault);
         HsmSigner hsm = new MockHsmSigner(domain, approverBindings(), Clock.systemUTC());
+        // Kept after the run (target/ is git-ignored) so it can be inspected and re-verified.
+        Path auditDir = Files.createDirectories(Path.of("target", "demo-audit"));
+        for (String f : new String[] {"audit.log", "audit.anchors", "tampered.log", "cut.log"}) {
+            Files.deleteIfExists(auditDir.resolve(f));
+        }
+        Path auditLog = auditDir.resolve("audit.log");
+        Path anchors = auditDir.resolve("audit.anchors");
+        AuditLog audit = AuditLog.open(auditLog, anchors, Clock.systemUTC(), 5);
         Orchestrator orch = new Orchestrator(domain, hsm, new VaultClient(rpc, vault, hsm),
-                new NonceStore.InMemory(), Clock.systemUTC(), Orchestrator.Policy.defaults());
+                new NonceStore.InMemory(), Clock.systemUTC(), Orchestrator.Policy.defaults(), audit);
+        audit.record("service.started", Map.of("vault", vault, "chainId", Long.toString(domain.chainId()), "signer", hsm.toString()));
         HttpApi api = new HttpApi(orch, 0);
         api.start();
         base = "http://127.0.0.1:" + api.port();
@@ -131,8 +147,96 @@ public final class Demo {
         } finally {
             api.stop();
         }
+
+        out.println("\n== 6. the audit log (" + auditLog.toAbsolutePath() + ")");
+        audit.anchor();
+        auditChecks(auditLog, anchors, auditDir);
         out.println("\nall " + checks + " checks passed");
         return new Result(checks, vault);
+    }
+
+    /** The log's own checks, then five ways of tampering with a copy of it. */
+    private void auditChecks(Path log, Path anchors, Path dir) throws Exception {
+        AuditLog.Result r = AuditLog.verify(log, anchors);
+        check("verifies: " + r.summary(), r.ok());
+
+        List<String> lines = Files.readAllLines(log);
+        Map<String, Integer> counts = new TreeMap<>();
+        int signed = 0, mined = 0, signersMatch = 0, received = 0;
+        for (String line : lines) {
+            Map<String, Object> e = Json.parseObject(line);
+            String ev = (String) e.get("event");
+            counts.merge(ev, 1, Integer::sum);
+            if (ev.equals("sign.requested")) signed++;
+            if (ev.equals("tx.mined")) mined++;
+            if (ev.equals("intent.received")) {
+                received++;
+                @SuppressWarnings("unchecked")
+                Map<String, Object> d = (Map<String, Object>) e.get("data");
+                @SuppressWarnings("unchecked")
+                Intents.SignedIntent si = Intents.fromJson((Map<String, Object>) d.get("intent"));
+                if (Objects.equals(si.signer(domain).orElse(null), d.get("signer"))) signersMatch++;
+            }
+        }
+        out.println("   events: " + counts);
+        check("every transaction has a sign.requested entry written before it (" + signed + " signed, " + mined + " mined)",
+                signed == mined && signed == 10);
+        check("every logged intent still carries a signature that recovers to the logged approver ("
+                + signersMatch + "/" + received + ")", signersMatch == received && received > 0);
+
+        // Tampering, each on a fresh copy.
+        String target = lines.stream().filter(l -> l.contains("\"intent.received\"") && l.contains("\"1000000000000000000\""))
+                .findFirst().orElseThrow();
+        int t = lines.indexOf(target);
+        tamper(dir, "an amount edited in one entry", anchors, copyWith(lines, t, target.replace("\"1000000000000000000\"", "\"9000000000000000000\"")));
+        List<String> deleted = new ArrayList<>(lines);
+        deleted.remove(t);
+        tamper(dir, "one entry deleted", anchors, deleted);
+        List<String> swapped = new ArrayList<>(lines);
+        Collections.swap(swapped, t, t + 1);
+        tamper(dir, "two entries swapped", anchors, swapped);
+        List<String> cut = new ArrayList<>(lines.subList(0, lines.size() - 3));
+        Path emptyAnchors = dir.resolve("none.anchors");
+        Path cutLog = write(dir, "cut.log", cut);
+        check("cutting off the last 3 entries is NOT detected by the chain alone: "
+                + AuditLog.verify(cutLog, emptyAnchors).summary().replaceAll(", head.*", ""), AuditLog.verify(cutLog, emptyAnchors).ok());
+        tamper(dir, "the last 3 entries cut off (caught by the anchor)", anchors, cut);
+        tamper(dir, "the whole chain rebuilt after an edit (caught by the anchor)", anchors, rechain(copyWith(lines, t,
+                target.replace("\"1000000000000000000\"", "\"9000000000000000000\""))));
+    }
+
+    private static List<String> copyWith(List<String> lines, int i, String replacement) {
+        List<String> c = new ArrayList<>(lines);
+        c.set(i, replacement);
+        return c;
+    }
+
+    /** What an attacker with write access to the log could do: recompute every prev/hash. */
+    @SuppressWarnings("unchecked")
+    private static List<String> rechain(List<String> lines) {
+        List<String> out = new ArrayList<>();
+        String prev = AuditLog.GENESIS;
+        for (String l : lines) {
+            Map<String, Object> e = Json.parseObject(l);
+            e.remove("hash");
+            e.put("prev", prev);
+            prev = AuditLog.hashOf(e);
+            e.put("hash", prev);
+            out.add(Json.write(e));
+        }
+        return out;
+    }
+
+    private static Path write(Path dir, String name, List<String> lines) throws Exception {
+        Path p = dir.resolve(name);
+        Files.writeString(p, String.join("\n", lines) + "\n");
+        return p;
+    }
+
+    private void tamper(Path dir, String what, Path anchors, List<String> lines) throws Exception {
+        AuditLog.Result r = AuditLog.verify(write(dir, "tampered.log", lines), anchors);
+        if (r.ok()) throw new AssertionError("CHECK FAILED: tampering not detected: " + what);
+        check("detected " + what + " -> " + r.problem(), true);
     }
 
     // ---- helpers --------------------------------------------------------------------------

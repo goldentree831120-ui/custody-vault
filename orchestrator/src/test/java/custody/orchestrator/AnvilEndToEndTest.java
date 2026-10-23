@@ -46,7 +46,7 @@ class AnvilEndToEndTest {
             PrintStream out = new PrintStream(buf, true, StandardCharsets.UTF_8);
             Demo.Result r = new Demo(rpc, out).run(ARTIFACT);
             System.out.print(buf.toString(StandardCharsets.UTF_8));
-            assertEquals(20, r.checks());
+            assertEquals(29, r.checks());
         } finally {
             anvil.destroy();
             anvil.waitFor(5, TimeUnit.SECONDS);
