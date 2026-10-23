@@ -11,6 +11,7 @@ mutate() { # name, perl substitution
   cp /tmp/CustodyVault.sol.orig "$SRC"
   perl -0pi -e "$2" "$SRC"
   if cmp -s "$SRC" /tmp/CustodyVault.sol.orig; then echo "?? $1: mutation did not apply"; return; fi
+  rm -rf cache/invariant # no replaying a counterexample saved by an earlier mutant
   forge test >/tmp/mut.log 2>&1
   local inv unit
   # Failing invariants = every invariant named in the log minus those marked [PASS].

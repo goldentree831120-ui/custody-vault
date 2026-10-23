@@ -16,9 +16,9 @@ Any single owner can **pause** withdrawals or **cancel** any pending proposal. T
 admin key, no upgrade path and no `delegatecall`. The only way to change settings is an
 approved, timelocked proposal that calls one of six whitelisted functions.
 
-**In scope:** the Solidity contract and its rules. **Out of scope:** how owners store keys
-(HSM/MPC, M4 uses mocked test keys), the Java signing orchestrator (M4), the Bitcoin
-2-of-3 path (M6), any front end, and the organisation's process for deciding *what* to
+**In scope:** the Solidity contract and its rules (§1–6); the signing orchestrator, mock signer,
+audit log and Bitcoin 2-of-3 path are covered in §7. **Out of scope:** real key storage (HSM/MPC;
+M4 uses mocked test keys), any front end, and the organisation's process for deciding *what* to
 withdraw.
 
 **Assumptions:** Ethereum consensus is honest and transactions are eventually included;
@@ -98,8 +98,11 @@ Approving twice reverts, and an executed proposal is closed before any funds mov
 (`test_cannotApproveTwice_orExecuteTwice`). When the owner set or threshold changes, every open
 proposal becomes stale, so approvals from removed owners can't be carried forward
 (`test_ownerChange_invalidatesOpenProposals`).
-**If M4 adds off-chain EIP-712 signatures,** the signed message must include the chain id, the
-vault address, the proposal id and a deadline; otherwise replay becomes a real risk.
+**Off-chain signatures (added in M4):** approvers sign EIP-712 intents for the orchestrator.
+The domain binds the chain id and the vault address; each message carries a per-approver nonce
+(single use, persisted) and a deadline of at most 1 hour; an approval also names the proposal
+id **and** its asset, destination and amount, checked against the proposal on-chain. The vault
+itself still only accepts on-chain approvals, so none of this widens the contract's surface (§7).
 
 ### 4.4 Malicious or wrong destination
 Adding an address to the allowlist is a config change: M approvals plus the timelock, and any
@@ -192,3 +195,29 @@ a timelock of at least one hour. A block producer can *delay* an honest owner's 
 - **Non-standard tokens** (fee-on-transfer, rebasing, blocklists): not supported (§4.8).
 - **Not formally verified, not audited.** The guarantees are what the tests and invariants
   check (thousands of random action sequences per run), no more.
+
+## 7. Around the contract (added in M7, after M4–M6 were built)
+
+The sections above cover the contract. These are the components built later, with the threats
+each one was designed for. Details and tests are in `orchestrator/README.md` and `bitcoin/README.md`.
+
+| Threat | Component | Control | Evidence |
+|---|---|---|---|
+| The application server (orchestrator) is compromised | mock HSM signer | The signer re-checks every request itself: approver signature bound to that key slot, unexpired, unused nonce, calldata **exactly** the call the intent describes, `to` = vault, no ETH value, chain 31337 only. Without an intent it signs only `execute(id)` | `MockHsmSignerTest`; demo §4 bypasses the orchestrator and is refused |
+| An approver is tricked into approving the wrong withdrawal | orchestrator | The approval intent names asset, destination and amount; they must match the on-chain proposal | `approvalMustMatchTheProposalOnChain`; demo `PROPOSAL_MISMATCH` |
+| A signed intent is replayed or kept for later | orchestrator + signer | Per-approver nonces (persisted, used up before signing) checked by both; deadlines ≤ 1 hour | `replayIsRejected`, `refusesExpiredIntentsAndReplays`, `fileNonceStoreSurvivesARestart` |
+| A signature is made with no record, or a record is altered afterwards | audit log | Write-ahead `sign.requested` entry (no entry, no signature); SHA-256 hash chain; anchors against truncation and full rewrites; refuses to start on a broken log | `nothingIsSignedIfTheSigningRequestCantBeRecorded`, `AuditLogTest`, demo §6 |
+| Bitcoin: a coordinator or one key moves funds | 2-of-3 P2WSH | The rule is in the output script; the coordinator holds public keys only | `bitcoin/regtest-multisig.sh` §4 |
+| Bitcoin: a signer signs something other than intended | PSBT review | Outputs, amounts and change ownership are checked **before** signing; signatures commit to all outputs | `regtest-multisig.sh` §3 and §5 |
+
+**Residual risks these add:**
+- ⚖️ **All three owner keys sit in one mock signer process.** That is a demo shortcut. Each owner
+  key must live in a separate HSM or MPC party run by different people, or compromising one host
+  equals M keys (§4.2). The signer's independent policy is designed so it can be split that way.
+- The mock signer keeps its used-nonce set in memory; after a restart only the orchestrator's
+  nonce file blocks replays. A real HSM needs persistent replay state and a trusted clock.
+- Audit anchors protect only if stored where the orchestrator's host can't rewrite them
+  (WORM storage, another team, a public chain). Entries after the last anchor can be cut off.
+- Plain Bitcoin multisig has **none** of the vault's timelock, rate limit, allowlist or pause.
+  Those would need script timelocks (e.g. `OP_CHECKSEQUENCEVERIFY` recovery paths) or signer-side
+  policy.

@@ -86,7 +86,13 @@ contract VaultHandler is CommonBase, StdCheats, StdUtils {
         if (r < 6) amount = bound(amount, 1, uint256(large) - 1);
         else if (r < 9) amount = bound(amount, large, limit);
         else amount = uint256(limit) + 1;
+        return _proposeExact(owner, asset, to, amount, large);
+    }
 
+    function _proposeExact(address owner, address asset, address to, uint256 amount, uint256 large)
+        internal
+        returns (bool)
+    {
         vm.prank(owner);
         try vault.proposeWithdrawal(asset, to, amount) returns (uint256 id) {
             proposalsCreated++;
@@ -96,6 +102,27 @@ contract VaultHandler is CommonBase, StdCheats, StdUtils {
             return true;
         } catch {
             return false;
+        }
+    }
+
+    /// Idle for a few days, then try to pull many small (not timelocked) withdrawals at once.
+    /// This is the pattern a capped bucket must stop: without the cap, idle days would let
+    /// several days' worth out in one burst. Random sequences rarely line this up on their own
+    /// (the burst invariant caught an uncapped bucket in only ~3 of 10 runs without this action).
+    function idleThenBurst(uint256 seed) external {
+        calls[this.idleThenBurst.selector]++;
+        if (paused) return;
+        skip(bound(seed, 2 days, 5 days));
+        address asset = seed % 2 == 0 ? address(usd) : ETH;
+        (, uint128 large) = vault.assetPolicy(asset);
+        address to = destinations[seed % 2]; // an allowlisted one
+        for (uint256 j = 0; j < 8; j++) {
+            if (!_proposeExact(_owner(seed + j), asset, to, uint256(large) - 1, large)) return;
+            uint256 i = props.length - 1;
+            for (uint256 k = 1; k < threshold; k++) {
+                _approve(i, owners[((seed + j) % owners.length + k) % owners.length]);
+            }
+            _execute(_owner(seed + j), i);
         }
     }
 
@@ -149,10 +176,12 @@ contract VaultHandler is CommonBase, StdCheats, StdUtils {
     function execute(uint256 actorSeed, uint256 propSeed) external {
         calls[this.execute.selector]++;
         if (props.length == 0) return;
-        uint256 i = _pick(propSeed);
-        Model storage m = props[i];
         address actor = actorSeed % (owners.length + 1) == owners.length ? outsider : _owner(actorSeed);
+        _execute(actor, _pick(propSeed));
+    }
 
+    function _execute(address actor, uint256 i) internal {
+        Model storage m = props[i];
         executeAttempts++;
         uint256 before = _balance(m.asset, m.to);
         vm.prank(actor);

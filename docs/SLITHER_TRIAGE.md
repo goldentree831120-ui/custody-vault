@@ -40,3 +40,18 @@ vault: whether M stolen keys can drain it faster than the rate limit, whether a 
 can skip the timelock, or whether one owner can freeze it (they can, by design, see
 [`THREAT_MODEL.md`](THREAT_MODEL.md) §4.6). Those are answered by the threat model and checked
 by the invariant tests and `script/mutation-check.sh`, not by static analysis.
+
+## Foundry's linter (`forge lint`)
+
+Newer Foundry versions also lint during `forge build` (the warnings printed before
+`orchestrator/demo.sh` starts). They were reviewed in M7 against the same code; none needs a
+code change.
+
+| Lint | Where | Decision | Reasoning |
+|---|---|---|---|
+| `block-timestamp` (×3), `reentrancy-eth`, `reentrancy-no-eth`, `reentrancy-events`, `arbitrary-send-eth` | timelock / expiry / bucket checks; `execute`'s two external calls; `Withdrawn` event | **Same as Slither above** | Time-based by design; `execute` is `nonReentrant` with effects before interactions; the ETH destination must be on the allowlist (M-of-N + timelock to add). The event after the transfer can't be reordered by re-entry because re-entry reverts. |
+| `missing-events-access-control` (×3) | `hasApproved[...] = true/false` in `approve`, `revoke`, `_newProposal` | **False positive** | Each write is followed by an `Approved` or `Revoked` event in the same function. |
+| `unsafe-typecast` (×6) | `uint64(block.timestamp)`; `uint128(p.amount)`; `uint128(total < limit ? total : limit)` | **Safe** | A `uint64` holds Unix time until the year ~584 billion. `p.amount <= available`, which is a `uint128`, is checked on the line before the cast; the bucket value is capped at the `uint128` limit. |
+| `non-reentrant-not-first` | `execute(...) onlyOwner nonReentrant` | **Accepted** | `onlyOwner` only reads storage and makes no external call, so running it before the guard can't be exploited. |
+| `require-revert-in-loop` | constructor owner validation | **Accepted** | Runs once, at deployment, over at most 20 owners; reverting on the first bad owner is the intent. |
+| `environment-read-across-mutation` (×3) | `test/CustodyVault.t.sol` | **Test code** | The tests read `block.timestamp` before `skip()` on purpose, to compute deadlines relative to the start. |
