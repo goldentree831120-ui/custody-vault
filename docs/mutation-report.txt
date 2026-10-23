@@ -1,0 +1,12 @@
+caught    execute ignores threshold (needs 1 approval)
+          invariants: none   unit/fuzz tests failing: 4
+caught    threshold check AND timelock start both use 1
+          invariants: invariant_largeWithdrawalsRespectTimelock invariant_noExecutionWithoutMApprovals    unit/fuzz tests failing: 5
+caught    large withdrawals skip the timelock
+          invariants: invariant_largeWithdrawalsRespectTimelock    unit/fuzz tests failing: 4
+caught    rate-limit bucket is not capped
+          invariants: invariant_noBurstBeyondBucket    unit/fuzz tests failing: 3
+caught    allowlist not checked at proposal or execution
+          invariants: invariant_conservation invariant_onlyAllowlistedDestinationsReceiveFunds    unit/fuzz tests failing: 2
+caught    pause does not block execution
+          invariants: invariant_nothingExecutesWhilePaused    unit/fuzz tests failing: 1

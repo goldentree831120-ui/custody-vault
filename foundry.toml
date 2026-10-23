@@ -1,0 +1,30 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.26"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+remappings = [
+  "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+  "forge-std/=lib/forge-std/src/",
+]
+
+[fuzz]
+runs = 1000
+
+[invariant]
+runs = 256
+depth = 100
+# Handlers try many calls that SHOULD revert (non-owners, unapproved executes).
+# Those reverts are expected; the invariants are what must never break.
+fail_on_revert = false
+
+# Heavier run for CI or before a release: FOUNDRY_PROFILE=deep forge test
+[profile.deep.fuzz]
+runs = 20000
+
+[profile.deep.invariant]
+runs = 2000
+depth = 200

@@ -1,0 +1,82 @@
+# Custody Vault
+
+A multisig custody vault with a policy engine: M-of-N approvals, a timelock on large
+withdrawals and on every configuration change, per-asset rate limits, a destination
+allowlist and an emergency pause. Solidity + Foundry.
+
+Status: **M1** threat model outline (`docs/THREAT_MODEL.md`, for me to write) and
+**M2** vault + tests are done. M3 Slither, M4 Java signing orchestrator, M5 hash-chained
+audit log, M6 Bitcoin regtest PSBT and M7 README are next.
+
+```bash
+# once, after cloning: install the pinned dependencies into lib/ (git submodules)
+forge install foundry-rs/forge-std@v1.17.0 OpenZeppelin/openzeppelin-contracts@v5.1.0
+forge test               # 35 unit/fuzz tests + 7 invariants, ~10 s
+FOUNDRY_PROFILE=deep forge test --match-path 'test/invariant/*'   # 2,000 runs x 200 calls, ~2-3 min
+./script/mutation-check.sh   # plants 6 bugs one at a time; the suite must catch each
+```
+
+On Windows, run these in WSL or Git Bash (Foundry: https://getfoundry.sh).
+
+## How a withdrawal works
+
+```
+ owner A                owners B..M                      any owner
+ proposeWithdrawal ──▶  approve ... (M reached) ──▶ [timelock if large] ──▶ execute
+   checks: not paused,                                 checks again: M approvals from
+   destination allowlisted,                            current owners, timelock passed,
+   amount <= daily limit                               not paused, still allowlisted,
+                                                       rate-limit bucket has room
+                    any single owner can cancel() at any point before execute
+```
+
+Configuration changes (owners, threshold, allowlist, limits, unpause) use the same flow
+with `proposeConfig(calldata)`. They are **always** timelocked, and the calldata can only
+target the six `onlySelf` functions. There is no admin key.
+
+## Design decisions
+
+| Decision | Why | Trade-off |
+|---|---|---|
+| Approvals are on-chain transactions, not off-chain signatures | No signature replay surface; every approval is logged with its sender | Each approval costs gas. M4 can add EIP-712 signatures with a nonce + chain id + vault address in the domain |
+| **Token bucket** rate limit, not a fixed daily window | A fixed window lets 2x the limit out across midnight. A bucket never holds more than one day's limit | Slightly more state. Rounding is floor, so it always errs toward the vault |
+| New assets start with an **empty** bucket | Total outflow since configuration is provably `<= limit * days` | First withdrawal of a new asset waits for refill |
+| Lowering a limit clamps immediately; raising it refills gradually | Tightening should be instant, loosening should not create a burst | |
+| Timelock applies if the withdrawal was large **when proposed or** is large under the current policy | Changing the policy can make a pending withdrawal stricter, never looser | |
+| Any single owner can `cancel` and `pause` | One honest owner can stop M compromised keys during the timelock | One malicious owner can grief (pause/cancel repeatedly). Recovery is removing them via M-of-N, which they can also cancel: documented in the threat model |
+| Unpause needs M-of-N + timelock | A stolen single key cannot undo a pause | Slow recovery after a false alarm |
+| Owner/threshold change invalidates all open proposals (`ownerSetVersion`) | Approvals given under the old owner set cannot be carried over | Pending proposals must be re-proposed |
+| Approval window 14 days, execution window 7 days after becoming executable | Old approvals can't be used months later | |
+| Allowlist checked at propose **and** execute | Removing a destination stops proposals already approved for it | |
+
+Out of scope for M2: fee-on-transfer and rebasing tokens, ERC-777 hooks, upgradeability,
+key storage. See the threat model.
+
+## Tests
+
+`test/CustodyVault.t.sol`: one test per rule, plus two fuzz tests.
+
+`test/invariant/`: a handler drives random sequences of propose / approve / revoke /
+cancel / execute / pause / unpause / time jumps across 5 owners (threshold 3), an
+outsider, two allowlisted destinations and one that is not. The handler keeps its **own
+model** of approvals and timelocks, built only from calls that succeeded, and checks
+the vault against it. Invariants:
+
+| Invariant | Meaning |
+|---|---|
+| `noExecutionWithoutMApprovals` | every executed proposal had M approvals from current owners (by the model's count); the outsider never executed anything |
+| `withdrawalsNeverExceedRateLimit` | total outflow per asset `<= dailyLimit * days since policy set` |
+| `noBurstBeyondBucket` | for any window between two withdrawals, outflow `<= limit + refill during the window` |
+| `largeWithdrawalsRespectTimelock` | large withdrawals never ran before M approvals + delay |
+| `nothingExecutesWhilePaused` | |
+| `onlyAllowlistedDestinationsReceiveFunds` | outsider, owners and the non-allowlisted address never received anything |
+| `conservation` | vault + destinations always equals deposits |
+
+**Do the invariants actually catch bugs?** `script/mutation-check.sh` plants six bugs
+(ignore the threshold, skip the timelock, uncap the bucket, drop the allowlist check,
+ignore pause...) and confirms each one makes the suite fail. Result in
+`docs/mutation-report.txt`. Writing it found two real weaknesses in the first
+version of the tests: removing the bucket cap passed every invariant (the cumulative
+bound still held), which is why `noBurstBeyondBucket` exists; and removing only the
+threshold check was hidden by the timelock gate, so it is caught by the unit tests rather
+than the invariants.
